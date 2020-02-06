@@ -7,3 +7,4 @@
 /obj/
 /libs/
 *.a
+.travis.yml
