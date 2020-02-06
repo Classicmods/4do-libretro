@@ -2,11 +2,11 @@
 #include "libfreedo/freedo_arm.h"
 #include "libfreedo/freedo_bios.h"
 #include "libfreedo/freedo_cdrom.h"
+#include "libfreedo/freedo_clock.h"
 #include "libfreedo/freedo_core.h"
-#include "libfreedo/freedo_frame.h"
 #include "libfreedo/freedo_madam.h"
 #include "libfreedo/freedo_pbus.h"
-#include "libfreedo/freedo_quarz.h"
+#include "libfreedo/freedo_region.h"
 #include "libfreedo/freedo_vdlp.h"
 #include "libfreedo/hack_flags.h"
 
@@ -21,6 +21,7 @@
 #include <boolean.h>
 #include <file/file_path.h>
 #include <libretro.h>
+#include <libretro_core_options.h>
 #include <retro_miscellaneous.h>
 #include <streams/file_stream.h>
 
@@ -32,143 +33,18 @@
 
 #define CDIMAGE_SECTOR_SIZE 2048
 
-static vdlp_frame_t *FRAME = NULL;
-
-static cdimage_t  CDIMAGE;
-static uint32_t   CDIMAGE_SECTOR;
-static uint32_t  *VIDEO_BUFFER = NULL;
-static uint32_t   VIDEO_WIDTH;
-static uint32_t   VIDEO_HEIGHT;
-static uint32_t   ACTIVE_DEVICES;
-
+static cdimage_t            CDIMAGE;
+static uint32_t             CDIMAGE_SECTOR;
+static uint32_t            *g_VIDEO_BUFFER;
+static uint32_t             g_VIDEO_WIDTH;
+static uint32_t             g_VIDEO_HEIGHT;
+static uint32_t             g_VIDEO_PITCH_SHIFT;
+static uint32_t             ACTIVE_DEVICES;
+static int                  g_PIXEL_FORMAT_SET  = false;
+static vdlp_pixel_format_e  g_VDLP_PIXEL_FORMAT = VDLP_PIXEL_FORMAT_XRGB8888;
+static uint32_t             g_VDLP_FLAGS        = VDLP_FLAG_NONE;
 static const freedo_bios_t *BIOS = NULL;
 static const freedo_bios_t *FONT = NULL;
-
-static
-bool
-file_exists(const char *path_)
-{
-  RFILE *fp;
-
-  fp = filestream_open(path_,
-                       RETRO_VFS_FILE_ACCESS_READ,
-                       RETRO_VFS_FILE_ACCESS_HINT_NONE);
-
-  if(fp == NULL)
-    return false;
-
-  filestream_close(fp);
-
-  return true;
-}
-
-static
-bool
-file_exists_in_system_directory(const char *filename_)
-{
-  int rv;
-  char fullpath[PATH_MAX_LENGTH];
-  const char *system_path;
-
-  system_path = NULL;
-  rv = retro_environment_cb(RETRO_ENVIRONMENT_GET_SYSTEM_DIRECTORY,&system_path);
-  if((rv == 0) || (system_path == NULL))
-    return false;
-
-  fill_pathname_join(fullpath,system_path,filename_,PATH_MAX_LENGTH);
-
-  return file_exists(fullpath);
-}
-
-static
-void
-create_bios_option_list(char *buf_)
-{
-  int rv;
-  const freedo_bios_t *bios;
-
-  strcpy(buf_,"BIOS (rom1); ");
-  for(bios = freedo_bios_begin(); bios != freedo_bios_end(); bios++)
-    {
-      rv = file_exists_in_system_directory(bios->filename);
-      if(rv)
-        {
-          strcat(buf_,bios->name);
-          strcat(buf_,"|");
-        }
-    }
-
-  rv = (strlen(buf_) - 1);
-  if(buf_[rv] == '|')
-    buf_[rv] = '\0';
-  else
-    strcat(buf_,"None Found");
-}
-
-static
-void
-create_font_option_list(char *buf_)
-{
-  int rv;
-  const freedo_bios_t *font;
-
-  strcpy(buf_,"Font (rom2); disabled|");
-  for(font = freedo_bios_font_begin(); font != freedo_bios_font_end(); font++)
-    {
-      rv = file_exists_in_system_directory(font->filename);
-      if(rv)
-        {
-          strcat(buf_,font->name);
-          strcat(buf_,"|");
-        }
-    }
-
-  rv = (strlen(buf_) - 1);
-  buf_[rv] = '\0';
-}
-
-static
-void
-retro_environment_set_variables(void)
-{
-  char bios[1024];
-  char font[1024];
-  static struct retro_variable vars[] =
-    {
-      { "4do_bios", NULL },
-      { "4do_font", NULL },
-      { "4do_cpu_overclock",        "CPU overclock; "
-                                    "1.0x (12.50Mhz)|"
-                                    "1.1x (13.75Mhz)|"
-                                    "1.2x (15.00Mhz)|"
-                                    "1.5x (18.75Mhz)|"
-                                    "1.6x (20.00Mhz)|"
-                                    "1.8x (22.50Mhz)|"
-                                    "2.0x (25.00Mhz)" },
-#if THREADED_DSP
-      { "4do_dsp_threaded",         "Threaded DSP; disabled|enabled" },
-#else
-      { "4do_dsp_threaded",         "Threaded DSP; unsupported" },
-#endif
-      { "4do_high_resolution",      "High Resolution; disabled|enabled" },
-      { "4do_nvram_storage",        "NVRAM Storage; per game|shared" },
-      { "4do_active_devices",       "Active Devices; 1|2|3|4|5|6|7|8|0" },
-      { "4do_hack_timing_1",        "Timing Hack 1 (Crash 'n Burn); disabled|enabled" },
-      { "4do_hack_timing_3",        "Timing Hack 3 (Dinopark Tycoon); disabled|enabled" },
-      { "4do_hack_timing_5",        "Timing Hack 5 (Microcosm); disabled|enabled" },
-      { "4do_hack_timing_6",        "Timing Hack 6 (Alone in the Dark); disabled|enabled" },
-      { "4do_hack_graphics_step_y", "Graphics Step Y Hack (Samurai Shodown); disabled|enabled" },
-      { "4do_madam_matrix_engine",  "MADAM Matrix Engine; hardware|software" },
-      { "4do_kprint",               "3DO debugging output (stderr); disabled|enabled" },
-      { NULL, NULL },
-    };
-
-  vars[0].value = bios;
-  vars[1].value = font;
-  create_bios_option_list(bios);
-  create_font_option_list(font);
-  retro_environment_cb(RETRO_ENVIRONMENT_SET_VARIABLES,(void*)vars);
-}
 
 static
 void
@@ -216,7 +92,8 @@ retro_set_environment(retro_environment_t cb_)
   retro_set_environment_cb(cb_);
 
   retro_environment_set_controller_info();
-  retro_environment_set_variables();
+  libretro_init_core_options();
+  libretro_set_core_options();
   retro_environment_set_support_no_game();
 }
 
@@ -254,27 +131,21 @@ static
 void
 video_init(void)
 {
-  if(VIDEO_BUFFER == NULL)
-    VIDEO_BUFFER = (uint32_t*)malloc(640 * 480 * sizeof(uint32_t));
+  uint32_t size;
 
-  if(FRAME == NULL)
-    FRAME = (vdlp_frame_t*)malloc(sizeof(vdlp_frame_t));
-
-  memset(FRAME,0,sizeof(vdlp_frame_t));
-  memset(VIDEO_BUFFER,0,(640 * 480 * sizeof(uint32_t)));
+  /* The 4x multiplication is for hires mode */
+  size = (freedo_region_max_width() * freedo_region_max_height() * 4);
+  if(g_VIDEO_BUFFER == NULL)
+    g_VIDEO_BUFFER = (uint32_t*)calloc(size,sizeof(uint32_t));
 }
 
 static
 void
 video_destroy(void)
 {
-  if(VIDEO_BUFFER != NULL)
-    free(VIDEO_BUFFER);
-  VIDEO_BUFFER = NULL;
-
-  if(FRAME != NULL)
-    free(FRAME);
-  FRAME = NULL;
+  if(g_VIDEO_BUFFER != NULL)
+    free(g_VIDEO_BUFFER);
+  g_VIDEO_BUFFER = NULL;
 }
 
 static
@@ -305,9 +176,6 @@ libfreedo_callback(int   cmd_,
 {
   switch(cmd_)
     {
-    case EXT_SWAPFRAME:
-      freedo_frame_get_bitmap_xrgb_8888(FRAME,VIDEO_BUFFER,VIDEO_WIDTH,VIDEO_HEIGHT);
-      return FRAME;
     case EXT_DSP_TRIGGER:
       lr_dsp_process();
       break;
@@ -330,20 +198,6 @@ retro_get_system_info(struct retro_system_info *info_)
   info_->library_version  = "1.3.2.4" GIT_VERSION;
   info_->need_fullpath    = true;
   info_->valid_extensions = "iso|bin|chd|cue";
-}
-
-void
-retro_get_system_av_info(struct retro_system_av_info *info_)
-{
-  memset(info_,0,sizeof(*info_));
-
-  info_->timing.fps            = 60;
-  info_->timing.sample_rate    = 44100;
-  info_->geometry.base_width   = VIDEO_WIDTH;
-  info_->geometry.base_height  = VIDEO_HEIGHT;
-  info_->geometry.max_width    = 640;
-  info_->geometry.max_height   = 480;
-  info_->geometry.aspect_ratio = 4.0 / 3.0;
 }
 
 size_t
@@ -410,7 +264,18 @@ option_enabled(const char *key_)
 
 static
 void
-check_option_4do_bios(void)
+chkopt_set_reset_bits(const char *key_,
+                            uint32_t   *input_,
+                            uint32_t    bitmask_)
+{
+  *input_ = (option_enabled(key_) ?
+             (*input_ | bitmask_) :
+             (*input_ & ~bitmask_));
+}
+
+static
+void
+chkopt_4do_bios(void)
 {
   int rv;
   const freedo_bios_t *bios;
@@ -440,7 +305,7 @@ check_option_4do_bios(void)
 
 static
 void
-check_option_4do_font(void)
+chkopt_4do_font(void)
 {
   int rv;
   const freedo_bios_t *font;
@@ -470,25 +335,49 @@ check_option_4do_font(void)
 
 static
 void
-check_option_4do_high_resolution(void)
+chkopt_4do_region(void)
 {
-  if(option_enabled("4do_high_resolution"))
+  int rv;
+  struct retro_variable var;
+
+  var.key   = "4do_region";
+  var.value = NULL;
+
+  rv = retro_environment_cb(RETRO_ENVIRONMENT_GET_VARIABLE,&var);
+  if(rv && var.value)
     {
-      HIRESMODE    = 1;
-      VIDEO_WIDTH  = 640;
-      VIDEO_HEIGHT = 480;
-    }
-  else
-    {
-      HIRESMODE    = 0;
-      VIDEO_WIDTH  = 320;
-      VIDEO_HEIGHT = 240;
+      if(!strcmp(var.value,"ntsc"))
+        freedo_region_set_NTSC();
+      else if(!strcmp(var.value,"pal1"))
+        freedo_region_set_PAL1();
+      else if(!strcmp(var.value,"pal2"))
+        freedo_region_set_PAL2();
     }
 }
 
 static
 void
-check_option_4do_cpu_overclock(void)
+chkopt_4do_high_resolution(void)
+{
+  if(option_enabled("4do_high_resolution"))
+    {
+      HIRESMODE       = 1;
+      g_VIDEO_WIDTH   = (freedo_region_width()  << 1);
+      g_VIDEO_HEIGHT  = (freedo_region_height() << 1);
+      g_VDLP_FLAGS   |= VDLP_FLAG_HIRES_CEL;
+    }
+  else
+    {
+      HIRESMODE       = 0;
+      g_VIDEO_WIDTH   = freedo_region_width();
+      g_VIDEO_HEIGHT  = freedo_region_height();
+      g_VDLP_FLAGS   &= ~VDLP_FLAG_HIRES_CEL;
+    }
+}
+
+static
+void
+chkopt_4do_cpu_overclock(void)
 {
   int rv;
   struct retro_variable var;
@@ -503,24 +392,49 @@ check_option_4do_cpu_overclock(void)
 
       mul = atof(var.value);
 
-      freedo_quarz_cpu_set_freq_mul(mul);
+      freedo_clock_cpu_set_freq_mul(mul);
     }
 }
 
 static
 void
-check_option_set_reset_bits(const char *key_,
-                         int        *input_,
-                         int         bitmask_)
+chkopt_4do_vdlp_pixel_format(void)
 {
-  *input_ = (option_enabled(key_) ?
-             (*input_ | bitmask_) :
-             (*input_ & ~bitmask_));
+  int rv;
+  struct retro_variable var;
+
+  if(g_PIXEL_FORMAT_SET)
+    return;
+
+  var.key   = "4do_vdlp_pixel_format";
+  var.value = NULL;
+
+  rv = retro_environment_cb(RETRO_ENVIRONMENT_GET_VARIABLE,&var);
+  if(rv && var.value)
+    {
+      if(!strcmp(var.value,"XRGB8888"))
+        g_VDLP_PIXEL_FORMAT = VDLP_PIXEL_FORMAT_XRGB8888;
+      else if(!strcmp(var.value,"RGB565"))
+        g_VDLP_PIXEL_FORMAT = VDLP_PIXEL_FORMAT_RGB565;
+      else if(!strcmp(var.value,"0RGB1555"))
+        g_VDLP_PIXEL_FORMAT = VDLP_PIXEL_FORMAT_0RGB1555;
+    }
+
+  g_PIXEL_FORMAT_SET = true;
+}
+
+static
+void
+chkopt_4do_vdlp_bypass_clut(void)
+{
+  chkopt_set_reset_bits("4do_vdlp_bypass_clut",
+                        &g_VDLP_FLAGS,
+                        VDLP_FLAG_CLUT_BYPASS);
 }
 
 static
 bool
-check_option_nvram_per_game(void)
+chkopt_nvram_per_game(void)
 {
   int rv;
   struct retro_variable var;
@@ -540,14 +454,14 @@ check_option_nvram_per_game(void)
 
 static
 bool
-check_option_nvram_shared(void)
+chkopt_nvram_shared(void)
 {
-  return !check_option_nvram_per_game();
+  return !chkopt_nvram_per_game();
 }
 
 static
 void
-check_option_4do_active_devices(void)
+chkopt_4do_active_devices(void)
 {
   int rv;
   struct retro_variable var;
@@ -567,7 +481,7 @@ check_option_4do_active_devices(void)
 
 static
 void
-check_option_4do_madam_matrix_engine(void)
+chkopt_4do_madam_matrix_engine(void)
 {
   int rv;
   struct retro_variable var;
@@ -587,7 +501,7 @@ check_option_4do_madam_matrix_engine(void)
 
 static
 void
-check_option_4do_kprint(void)
+chkopt_4do_kprint(void)
 {
   int rv;
 
@@ -601,7 +515,7 @@ check_option_4do_kprint(void)
 
 static
 void
-check_option_4do_dsp_threaded(void)
+chkopt_4do_dsp_threaded(void)
 {
   bool rv;
 
@@ -612,21 +526,38 @@ check_option_4do_dsp_threaded(void)
 
 static
 void
-check_options(void)
+chkopt_4do_swi_hle(void)
 {
-  check_option_4do_bios();
-  check_option_4do_font();
-  check_option_4do_high_resolution();
-  check_option_4do_cpu_overclock();
-  check_option_4do_dsp_threaded();
-  check_option_4do_active_devices();
-  check_option_set_reset_bits("4do_hack_timing_1",&FIXMODE,FIX_BIT_TIMING_1);
-  check_option_set_reset_bits("4do_hack_timing_3",&FIXMODE,FIX_BIT_TIMING_3);
-  check_option_set_reset_bits("4do_hack_timing_5",&FIXMODE,FIX_BIT_TIMING_5);
-  check_option_set_reset_bits("4do_hack_timing_6",&FIXMODE,FIX_BIT_TIMING_6);
-  check_option_set_reset_bits("4do_hack_graphics_step_y",&FIXMODE,FIX_BIT_GRAPHICS_STEP_Y);
-  check_option_4do_kprint();
-  check_option_4do_madam_matrix_engine();
+  bool rv;
+
+  rv = option_enabled("4do_swi_hle");
+
+  freedo_arm_swi_hle_set(rv);
+}
+
+static
+void
+chkopts(void)
+{
+  chkopt_4do_bios();
+  chkopt_4do_font();
+  chkopt_4do_region();
+  chkopt_4do_vdlp_pixel_format();
+  chkopt_4do_vdlp_bypass_clut();
+  chkopt_4do_high_resolution();
+  chkopt_4do_cpu_overclock();
+  chkopt_4do_dsp_threaded();
+  chkopt_4do_active_devices();
+  chkopt_set_reset_bits("4do_hack_timing_1",&FIXMODE,FIX_BIT_TIMING_1);
+  chkopt_set_reset_bits("4do_hack_timing_3",&FIXMODE,FIX_BIT_TIMING_3);
+  chkopt_set_reset_bits("4do_hack_timing_5",&FIXMODE,FIX_BIT_TIMING_5);
+  chkopt_set_reset_bits("4do_hack_timing_6",&FIXMODE,FIX_BIT_TIMING_6);
+  chkopt_set_reset_bits("4do_hack_graphics_step_y",&FIXMODE,FIX_BIT_GRAPHICS_STEP_Y);
+  chkopt_4do_kprint();
+  chkopt_4do_madam_matrix_engine();
+  chkopt_4do_swi_hle();
+
+  freedo_vdlp_configure(g_VIDEO_BUFFER,g_VDLP_PIXEL_FORMAT,g_VDLP_FLAGS);
 }
 
 void
@@ -729,44 +660,101 @@ load_rom2(void)
   return 0;
 }
 
-bool
-retro_load_game(const struct retro_game_info *info_)
+enum retro_pixel_format
+vdlp_pixel_format_to_libretro(vdlp_pixel_format_e pf_)
+{
+  switch(pf_)
+    {
+    case VDLP_PIXEL_FORMAT_0RGB1555:
+      return RETRO_PIXEL_FORMAT_0RGB1555;
+    case VDLP_PIXEL_FORMAT_RGB565:
+      return RETRO_PIXEL_FORMAT_RGB565;
+    case VDLP_PIXEL_FORMAT_XRGB8888:
+      return RETRO_PIXEL_FORMAT_XRGB8888;
+    }
+
+  return RETRO_PIXEL_FORMAT_XRGB8888;
+}
+
+static
+int
+set_pixel_format(void)
 {
   int rv;
   enum retro_pixel_format fmt;
 
-  fmt = RETRO_PIXEL_FORMAT_XRGB8888;
+  fmt = vdlp_pixel_format_to_libretro(g_VDLP_PIXEL_FORMAT);
   rv = retro_environment_cb(RETRO_ENVIRONMENT_SET_PIXEL_FORMAT,&fmt);
   if(rv == 0)
     {
       retro_log_printf_cb(RETRO_LOG_ERROR,
-                          "[4DO]: XRGB8888 is not supported.\n");
-      return false;
+                          "[4DO]: pixel format is not supported.\n");
+      return -1;
     }
 
-  if(info_)
+  switch(fmt)
     {
-      rv = retro_cdimage_open(info_->path,&CDIMAGE);
-      if(rv == -1)
-        {
-          retro_log_printf_cb(RETRO_LOG_ERROR,
-                              "[4DO]: failure opening image - %s\n",
-                              info_->path);
-          return false;
-        }
+    case RETRO_PIXEL_FORMAT_XRGB8888:
+      g_VIDEO_PITCH_SHIFT = 2;
+      break;
+    default:
+    case RETRO_PIXEL_FORMAT_RGB565:
+    case RETRO_PIXEL_FORMAT_0RGB1555:
+      g_VIDEO_PITCH_SHIFT = 1;
+      break;
     }
 
-  check_options();
-  video_init();
+  return 0;
+}
+
+static
+int
+print_cdimage_open_fail(const char *path_)
+{
+  retro_log_printf_cb(RETRO_LOG_ERROR,
+                      "[4DO]: failure opening image - %s\n",
+                      path_);
+  return -1;
+}
+
+static
+int
+open_cdimage_if_needed(const struct retro_game_info *info_)
+{
+  int rv;
+
+  if(info_ == NULL)
+    return 0;
+
+  rv = retro_cdimage_open(info_->path,&CDIMAGE);
+  if(rv == -1)
+    return print_cdimage_open_fail(info_->path);
+
+  return 0;
+}
+
+bool
+retro_load_game(const struct retro_game_info *info_)
+{
+  int rv;
+
+  rv = open_cdimage_if_needed(info_);
+  if(rv == -1)
+    return false;
+
   cdimage_set_sector(0);
   freedo_3do_init(libfreedo_callback);
-
+  video_init();
+  chkopts();
   load_rom1();
   load_rom2();
 
-  /* XXX: Is this really a frontend responsibility? */
+  rv = set_pixel_format();
+  if(rv == -1)
+    return false;
+
   nvram_init(freedo_arm_nvram_get());
-  if(check_option_nvram_shared())
+  if(chkopt_nvram_shared())
     retro_nvram_load(freedo_arm_nvram_get());
 
   return true;
@@ -787,7 +775,7 @@ retro_load_game_special(unsigned                      game_type_,
 void
 retro_unload_game(void)
 {
-  if(check_option_nvram_shared())
+  if(chkopt_nvram_shared())
     retro_nvram_save(freedo_arm_nvram_get());
 
   lr_dsp_destroy();
@@ -798,10 +786,32 @@ retro_unload_game(void)
   video_destroy();
 }
 
+void
+retro_get_system_av_info(struct retro_system_av_info *info_)
+{
+  memset(info_,0,sizeof(*info_));
+
+  info_->timing.fps            = freedo_region_field_rate();
+  info_->timing.sample_rate    = 44100;
+  info_->geometry.base_width   = g_VIDEO_WIDTH;
+  info_->geometry.base_height  = g_VIDEO_HEIGHT;
+  info_->geometry.max_width    = (freedo_region_max_width()  << 1);
+  info_->geometry.max_height   = (freedo_region_max_height() << 1);
+  info_->geometry.aspect_ratio = 4.0 / 3.0;
+}
+
 unsigned
 retro_get_region(void)
 {
-  return RETRO_REGION_NTSC;
+  switch(freedo_region_get())
+    {
+    case FREEDO_REGION_PAL1:
+    case FREEDO_REGION_PAL2:
+      return RETRO_REGION_PAL;
+    case FREEDO_REGION_NTSC:
+    default:
+      return RETRO_REGION_NTSC;
+    }
 }
 
 unsigned
@@ -816,7 +826,7 @@ retro_get_memory_data(unsigned id_)
   switch(id_)
     {
     case RETRO_MEMORY_SAVE_RAM:
-      if(check_option_nvram_shared())
+      if(chkopt_nvram_shared())
         return NULL;
       return freedo_arm_nvram_get();
     case RETRO_MEMORY_SYSTEM_RAM:
@@ -834,7 +844,7 @@ retro_get_memory_size(unsigned id_)
   switch(id_)
     {
     case RETRO_MEMORY_SAVE_RAM:
-      if(check_option_nvram_shared())
+      if(chkopt_nvram_shared())
         return 0;
       return freedo_arm_nvram_size();
     case RETRO_MEMORY_SYSTEM_RAM:
@@ -876,23 +886,22 @@ retro_deinit(void)
 void
 retro_reset(void)
 {
-  if(check_option_nvram_shared())
+  if(chkopt_nvram_shared())
     retro_nvram_save(freedo_arm_nvram_get());
 
   lr_dsp_destroy();
   freedo_3do_destroy();
 
-  check_options();
-  video_init();
-  cdimage_set_sector(0);
   freedo_3do_init(libfreedo_callback);
-
+  video_init();
+  chkopts();
+  cdimage_set_sector(0);
   load_rom1();
   load_rom2();
 
   /* XXX: Is this really a frontend responsibility? */
   nvram_init(freedo_arm_nvram_get());
-  if(check_option_nvram_shared())
+  if(chkopt_nvram_shared())
     retro_nvram_load(freedo_arm_nvram_get());
 }
 
@@ -901,15 +910,18 @@ retro_run(void)
 {
   bool updated = false;
   if(retro_environment_cb(RETRO_ENVIRONMENT_GET_VARIABLE_UPDATE,&updated) && updated)
-    check_options();
+    chkopts();
 
   lr_input_update(ACTIVE_DEVICES);
 
-  freedo_3do_process_frame(FRAME);
+  freedo_3do_process_frame();
 
-  lr_input_crosshairs_draw(VIDEO_BUFFER,VIDEO_WIDTH,VIDEO_HEIGHT);
+  lr_input_crosshairs_draw(g_VIDEO_BUFFER,g_VIDEO_WIDTH,g_VIDEO_HEIGHT);
 
   lr_dsp_upload();
 
-  retro_video_refresh_cb(VIDEO_BUFFER,VIDEO_WIDTH,VIDEO_HEIGHT,VIDEO_WIDTH << 2);
+  retro_video_refresh_cb(g_VIDEO_BUFFER,
+                         g_VIDEO_WIDTH,
+                         g_VIDEO_HEIGHT,
+                         g_VIDEO_WIDTH << g_VIDEO_PITCH_SHIFT);
 }

@@ -30,12 +30,12 @@
 
 #include "freedo_arm.h"
 #include "freedo_clio.h"
+#include "freedo_clock.h"
 #include "freedo_core.h"
 #include "freedo_diag_port.h"
 #include "freedo_dsp.h"
-#include "freedo_frame.h"
 #include "freedo_madam.h"
-#include "freedo_quarz.h"
+#include "freedo_region.h"
 #include "freedo_sport.h"
 #include "freedo_vdlp.h"
 #include "freedo_xbus.h"
@@ -50,9 +50,9 @@ static freedo_ext_interface_t io_interface;
 
 extern int flagtime;
 
-int HIRESMODE = 0;
-int FIXMODE   = 0;
-int CNBFIX    = 0;
+int      HIRESMODE = 0;
+uint32_t FIXMODE   = 0;
+int      CNBFIX    = 0;
 
 int
 freedo_3do_init(freedo_ext_interface_t callback_)
@@ -64,6 +64,8 @@ freedo_3do_init(freedo_ext_interface_t callback_)
   io_interface = callback_;
 
   CNBFIX = 0;
+
+  freedo_clock_init();
 
   freedo_arm_init();
 
@@ -114,8 +116,6 @@ freedo_3do_init(freedo_ext_interface_t callback_)
   */
   freedo_xbus_device_load(0,NULL);
 
-  freedo_quarz_init();
-
   return 0;
 }
 
@@ -127,52 +127,48 @@ freedo_3do_destroy()
 }
 
 static
+INLINE
 void
-freedo_3do_internal_frame(vdlp_frame_t *frame_,
-                          int           cycles_)
+freedo_3do_internal_frame(uint32_t  cycles_,
+                          uint32_t *line_,
+                          int       field_)
 {
-  int line;
-  int half_frame;
-
-  freedo_quarz_push_cycles(cycles_);
-  if(freedo_quarz_queue_dsp())
+  freedo_clock_push_cycles(cycles_);
+  if(freedo_clock_dsp_queued())
     io_interface(EXT_DSP_TRIGGER,NULL);
 
-  if(freedo_quarz_queue_timer())
+  if(freedo_clock_timer_queued())
     freedo_clio_timer_execute();
 
-  if(freedo_quarz_queue_vdl())
+  if(freedo_clock_vdl_queued())
     {
-      line       = freedo_quarz_vd_current_line();
-      half_frame = freedo_quarz_vd_half_frame();
+      freedo_clio_vcnt_update(*line_,field_);
+      freedo_vdlp_process_line(*line_);
 
-      freedo_clio_vcnt_update(line,half_frame);
-      freedo_vdlp_process_line(line,frame_);
-
-      if(line == freedo_clio_line_v0())
+      if(*line_ == freedo_clio_line_vint0())
         freedo_clio_fiq_generate(1<<0,0);
 
-      if(line == freedo_clio_line_v1())
-        {
-          freedo_clio_fiq_generate(1<<1,0);
-          io_interface(EXT_SWAPFRAME,frame_);
-        }
+      if(*line_ == freedo_clio_line_vint1())
+        freedo_clio_fiq_generate(1<<1,0);
+
+      (*line_)++;
     }
 }
 
 void
-freedo_3do_process_frame(vdlp_frame_t *frame_)
+freedo_3do_process_frame(void)
 {
-  uint32_t i;
-  uint32_t cnt;
-  uint64_t freq;
+  int32_t cnt;
+  uint32_t line;
+  uint32_t scanlines;
+  static int field = 0;
 
   if(flagtime)
     flagtime--;
 
-  i    = 0;
   cnt  = 0;
-  freq = freedo_quarz_cpu_get_freq();
+  line = 0;
+  scanlines = freedo_region_scanlines();
   do
     {
       if(freedo_madam_fsm_get() == FSM_INPROCESS)
@@ -182,14 +178,14 @@ freedo_3do_process_frame(vdlp_frame_t *frame_)
         }
 
       cnt += freedo_arm_execute();
-
       if(cnt >= 32)
         {
-          freedo_3do_internal_frame(frame_,cnt);
-          i += cnt;
-          cnt = 0;
+          freedo_3do_internal_frame(cnt,&line,field);
+          cnt -= 32;
         }
-    } while(i < (freq / 60));
+    } while(line < scanlines);
+
+  field = !field;
 }
 
 uint32_t
@@ -203,7 +199,7 @@ freedo_3do_state_size(void)
   tmp += freedo_vdlp_state_size();
   tmp += freedo_dsp_state_size();
   tmp += freedo_clio_state_size();
-  tmp += freedo_quarz_state_size();
+  tmp += freedo_clock_state_size();
   tmp += freedo_sport_state_size();
   tmp += freedo_madam_state_size();
   tmp += freedo_xbus_state_size();
@@ -226,7 +222,7 @@ freedo_3do_state_save(void *buf_)
   indexes[3] = indexes[2] + freedo_vdlp_state_size();
   indexes[4] = indexes[3] + freedo_dsp_state_size();
   indexes[5] = indexes[4] + freedo_clio_state_size();
-  indexes[6] = indexes[5] + freedo_quarz_state_size();
+  indexes[6] = indexes[5] + freedo_clock_state_size();
   indexes[7] = indexes[6] + freedo_sport_state_size();
   indexes[8] = indexes[7] + freedo_madam_state_size();
   indexes[9] = indexes[8] + freedo_xbus_state_size();
@@ -235,7 +231,7 @@ freedo_3do_state_save(void *buf_)
   freedo_vdlp_state_save(&data[indexes[2]]);
   freedo_dsp_state_save(&data[indexes[3]]);
   freedo_clio_state_save(&data[indexes[4]]);
-  freedo_quarz_state_save(&data[indexes[5]]);
+  freedo_clock_state_save(&data[indexes[5]]);
   freedo_sport_state_save(&data[indexes[6]]);
   freedo_madam_state_save(&data[indexes[7]]);
   freedo_xbus_state_save(&data[indexes[8]]);
@@ -257,7 +253,7 @@ freedo_3do_state_load(const void *buf_)
   freedo_vdlp_state_load(&data[indexes[2]]);
   freedo_dsp_state_load(&data[indexes[3]]);
   freedo_clio_state_load(&data[indexes[4]]);
-  freedo_quarz_state_load(&data[indexes[5]]);
+  freedo_clock_state_load(&data[indexes[5]]);
   freedo_sport_state_load(&data[indexes[6]]);
   freedo_madam_state_load(&data[indexes[7]]);
   freedo_xbus_state_load(&data[indexes[8]]);

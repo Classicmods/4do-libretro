@@ -1,6 +1,7 @@
 DEBUG = 0
 HAVE_CHD = 1
 THREADED_DSP=0
+HAVE_CDROM = 0
 
 ifeq ($(platform),)
 platform = unix
@@ -55,6 +56,7 @@ ifneq (,$(findstring unix,$(platform)))
     fpic := -fPIC
     SHARED := -lpthread -lm -shared -Wl,--no-undefined -Wl,--version-script=link.T
     THREADED_DSP = 1
+	 HAVE_CDROM = 1
 
     # Raspberry Pi
     ifneq (,$(findstring rpi,$(platform)))
@@ -91,8 +93,8 @@ ifneq (,$(findstring unix,$(platform)))
 # Platform affix = classic_<ISA>_<µARCH>
 # Help at https://modmyclassic.com/comp
 
-# (armv7 a7, hard point, neon based) ### 
-# NESC, SNESC, C64 mini 
+# (armv7 a7, hard point, neon based) ###
+# NESC, SNESC, C64 mini
 else ifeq ($(platform), classic_armv7_a7)
 	TARGET := $(TARGET_NAME)_libretro.so
 	fpic := -fPIC
@@ -146,6 +148,15 @@ else ifeq ($(platform), classic_armv8_a35)
 	endif
 #######################################
 
+# ARM
+else ifneq (,$(findstring armv,$(platform)))
+    AR = ${CC_PREFIX}ar
+    CC = ${CC_PREFIX}gcc
+
+    TARGET := $(TARGET_NAME)_libretro.so
+    fpic := -fPIC
+    SHARED := -shared -Wl,--no-undefined -Wl,--version-script=link.T
+
 else ifeq ($(platform), osx)
    TARGET := $(TARGET_NAME)_libretro.dylib
    fpic := -fPIC
@@ -185,6 +196,15 @@ else
    SHARED += -miphoneos-version-min=5.0
    CC +=  -miphoneos-version-min=5.0
 endif
+else ifeq ($(platform), tvos-arm64)
+
+   TARGET := $(TARGET_NAME)_libretro_tvos.dylib
+   fpic := -fPIC
+   SHARED := -dynamiclib
+ifeq ($(IOSSDK),)
+   IOSSDK := $(shell xcodebuild -version -sdk appletvos Path)
+endif
+
 else ifeq ($(platform), theos_ios)
 DEPLOYMENT_IOSVERSION = 5.0
 TARGET = iphone:latest:$(DEPLOYMENT_IOSVERSION)
@@ -234,9 +254,13 @@ else ifeq ($(platform), vita)
 else ifeq ($(platform), ctr)
    TARGET := $(TARGET_NAME)_libretro_$(platform).a
    CC = $(DEVKITARM)/bin/arm-none-eabi-gcc$(EXE_EXT)
+   CXX = $(DEVKITARM)/bin/arm-none-eabi-g++$(EXE_EXT)
    AR = $(DEVKITARM)/bin/arm-none-eabi-ar$(EXE_EXT)
+   FLAGS += -march=armv6k -mtune=mpcore -mfloat-abi=hard
+   FLAGS += -Wall -mword-relocations
+   FLAGS += -fomit-frame-pointer -ffast-math
+   FLAGS += -DARM11 -D_3DS
    STATIC_LINKING = 1
-   FLAGS += -D_3DS
 
 # Nintendo Switch (libtransistor)
 else ifeq ($(platform), switch)
@@ -285,15 +309,6 @@ else ifeq ($(platform), libnx)
 else ifeq ($(platform), emscripten)
    TARGET := $(TARGET_NAME)_libretro_$(platform).bc
    STATIC_LINKING = 1
-
-# Genode
-else ifeq ($(platform), genode)
-   TARGET   := $(TARGET_NAME)_libretro.lib.so
-   CC       := $(shell pkg-config genode-base --variable=cc)
-   LD       := $(shell pkg-config genode-base --variable=ld)
-   CFLAGS   += $(shell pkg-config --cflags genode-libc)
-   LDFLAGS  += -shared --version-script=link.T
-   LDFLAGS  += $(shell pkg-config --libs genode-lib genode-libc)
 
 # Windows MSVC 2003 Xbox 1
 else ifeq ($(platform), xbox1_msvc2003)
@@ -443,7 +458,7 @@ else ifneq (,$(findstring windows_msvc2017,$(platform)))
 	reg_query = $(call filter_out2,$(subst $2,,$(shell reg query "$2" -v "$1" 2>nul)))
 	fix_path = $(subst $(SPACE),\ ,$(subst \,/,$1))
 
-	ProgramFiles86w := $(shell cmd /c "echo %PROGRAMFILES(x86)%")
+	ProgramFiles86w := $(shell cmd //c "echo %PROGRAMFILES(x86)%")
 	ProgramFiles86 := $(shell cygpath "$(ProgramFiles86w)")
 
 	WindowsSdkDir ?= $(call reg_query,InstallationFolder,HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Microsoft SDKs\Windows\v10.0)
@@ -498,7 +513,7 @@ else ifneq (,$(findstring windows_msvc2017,$(platform)))
 	ifneq (,$(findstring uwp,$(PlatformSuffix)))
 		LIB := $(shell IFS=$$'\n'; cygpath -w "$(LIB)/store")
 	endif
-    
+
 	export INCLUDE := $(INCLUDE);$(WindowsSDKSharedIncludeDir);$(WindowsSDKUCRTIncludeDir);$(WindowsSDKUMIncludeDir)
 	export LIB := $(LIB);$(WindowsSDKUCRTLibDir);$(WindowsSDKUMLibDir)
 	TARGET := $(TARGET_NAME)_libretro.dll
@@ -508,10 +523,11 @@ else ifneq (,$(findstring windows_msvc2017,$(platform)))
 # Windows
 else
    TARGET := $(TARGET_NAME)_libretro.dll
-   CC = gcc
+   CC ?= gcc
    SHARED := -shared -Wl,--no-undefined -Wl,--version-script=link.T
    LDFLAGS += -static-libgcc -static-libstdc++ -lwinmm
 WINDOWS_VERSION=1
+	HAVE_CDROM = 1
 endif
 
 CORE_DIR := .
@@ -601,7 +617,7 @@ ifeq ($(STATIC_LINKING),1)
 else
 	LD = link.exe
 endif
-else ifneq ($(platform),genode)
+else
 	LD = $(CC)
 endif
 
@@ -615,8 +631,10 @@ all: $(TARGET)
 $(TARGET): $(OBJECTS)
 ifeq ($(STATIC_LINKING), 1)
 	$(AR) rcs $@ $(OBJECTS)
+else ifneq (,$(findstring msvc,$(platform)))
+	$(LD) $(fpic) $(LINKOUT)$@ $^ $(LDFLAGS) $(LIBS)
 else
-	$(LD) $(LINKOUT)$@ $^ $(LDFLAGS) $(LIBS)
+	$(LD) $(fpic) $(LINKOUT) $@ $^ $(LDFLAGS) $(LIBS)
 endif
 
 %.o: %.c

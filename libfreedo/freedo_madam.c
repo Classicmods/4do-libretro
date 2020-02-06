@@ -756,7 +756,7 @@ freedo_madam_poke(uint32_t addr_,
       HandleDMA8();
       break;
     case 0x580:
-      freedo_vdlp_process(val_);
+      freedo_vdlp_set_vdl_head(val_);
       return;
     case SPRSTRT:
       if(MADAM.FSM == FSM_IDLE)
@@ -2561,7 +2561,7 @@ TestInitVisual(int32_t packed_)
 }
 
 static
-int
+int32_t
 Init_Line_Map(void)
 {
   TEXEL_FUN_NUMBER = 0;
@@ -2786,7 +2786,7 @@ writePIX(int32_t  x_,
 }
 
 static
-int
+int32_t
 TexelDraw_Scale(uint16_t CURPIX_,
                 uint16_t LAMV_,
                 int32_t  xcur_,
