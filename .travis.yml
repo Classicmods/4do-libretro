@@ -4,7 +4,7 @@ os: linux
 env:
   global:
     - IMAGE=registry.gitlab.com/modmyclassic/docker-autodevops-buildenvs/mmc-crosscompiler-docker-image:latest_internal
-    - TARGETBUILD=4do-libretro
+    - TARGETBUILD=4do_libretro
   jobs:
     - TARGET=nesc CLOUD_DIR=NESC
     - TARGET=psc CLOUD_DIR=PSC
